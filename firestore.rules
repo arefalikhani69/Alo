@@ -1,0 +1,382 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function getAdminDoc() {
+      return get(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    // Authoritative Single Source of Truth: Document MUST exist in /admins and have active == true.
+    // Stale Custom Claims alone CANNOT bypass an absent or deactivated database document.
+    function isDatabaseAdmin() {
+      return isSignedIn() &&
+             exists(/databases/$(database)/documents/admins/$(request.auth.uid)) &&
+             getAdminDoc().data.active == true;
+    }
+
+    function isAdmin() {
+      return isDatabaseAdmin();
+    }
+
+    function isSuperAdmin() {
+      return isDatabaseAdmin() && getAdminDoc().data.role == 'super_admin';
+    }
+
+    function isOperationalAdmin() {
+      return isDatabaseAdmin() && (getAdminDoc().data.role == 'super_admin' || getAdminDoc().data.role == 'admin');
+    }
+
+    function isPubliclyReadable() {
+      return resource.data.status == 'published' || resource.data.status == 'verified';
+    }
+
+    // Manufacturers
+    match /manufacturers/{manufacturerId} {
+      allow get, list: if isPubliclyReadable() || isAdmin();
+      allow create, update, delete: if isAdmin() && isValidId(manufacturerId);
+    }
+
+    // Vehicles
+    match /vehicles/{vehicleId} {
+      allow get, list: if isPubliclyReadable() || isAdmin();
+      allow create, update, delete: if isAdmin() && isValidId(vehicleId);
+    }
+
+    // Engines
+    match /engines/{engineId} {
+      allow get, list: if isPubliclyReadable() || isAdmin();
+      allow create, update, delete: if isAdmin() && isValidId(engineId);
+    }
+
+    // ECUs
+    match /ecus/{ecuId} {
+      allow get, list: if isPubliclyReadable() || isAdmin();
+      allow create, update, delete: if isAdmin() && isValidId(ecuId);
+    }
+
+    // Connectors
+    match /connectors/{connectorId} {
+      allow get, list: if isPubliclyReadable() || isAdmin();
+      allow create, update, delete: if isAdmin() && isValidId(connectorId);
+    }
+
+    // Connector Pins
+    match /connectorPins/{pinId} {
+      allow get, list: if isPubliclyReadable() || isAdmin();
+      allow create, update, delete: if isAdmin() && isValidId(pinId);
+    }
+
+    // FuseBoxes
+    match /fuseBoxes/{fuseBoxId} {
+      allow get, list: if isPubliclyReadable() || isAdmin();
+      allow create, update, delete: if isAdmin() && isValidId(fuseBoxId);
+    }
+
+    // Fuses
+    match /fuses/{fuseId} {
+      allow get, list: if isPubliclyReadable() || isAdmin();
+      allow create, update, delete: if isAdmin() && isValidId(fuseId);
+    }
+
+    // Relays
+    match /relays/{relayId} {
+      allow get, list: if isPubliclyReadable() || isAdmin();
+      allow create, update, delete: if isAdmin() && isValidId(relayId);
+    }
+
+    // Wiring Diagrams
+    match /wiringDiagrams/{diagramId} {
+      allow get, list: if isPubliclyReadable() || isAdmin();
+      allow create, update, delete: if isAdmin() && isValidId(diagramId);
+    }
+
+    // Media & Photos
+    match /media/{mediaId} {
+      allow get, list: if true;
+      allow create, update, delete: if isAdmin() && isValidId(mediaId);
+    }
+
+    // Favorites
+    match /favorites/{favoriteId} {
+      allow get, list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn() && isValidId(favoriteId) && incoming().userId == request.auth.uid;
+      allow update, delete: if isSignedIn() && existing().userId == request.auth.uid;
+    }
+
+    function hasNoUserPrivilegeFields(data) {
+      return !('admin' in data) &&
+             !('isAdmin' in data) &&
+             !('adminRole' in data) &&
+             !('permissions' in data) &&
+             !('isSuperAdmin' in data);
+    }
+
+    function isValidUserProfileFields(data, userId) {
+      return data.keys().hasOnly([
+        'id',
+        'uid',
+        'email',
+        'displayName',
+        'role',
+        'isActive',
+        'accountStatus',
+        'createdAt',
+        'updatedAt',
+        'lastLoginAt',
+        'photoURL',
+        'authProvider',
+        'emailVerified',
+        'notes'
+      ]) &&
+      hasNoUserPrivilegeFields(data) &&
+      (!('id' in data) || data.id == userId) &&
+      (!('uid' in data) || data.uid == request.auth.uid) &&
+      (!('email' in data) || (data.email is string && data.email.size() <= 150)) &&
+      (!('displayName' in data) || (data.displayName is string && data.displayName.size() <= 150)) &&
+      (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 1000)) &&
+      (!('authProvider' in data) || (data.authProvider is string && data.authProvider.size() <= 50)) &&
+      (!('emailVerified' in data) || data.emailVerified is bool) &&
+      (!('notes' in data) || (data.notes is string && data.notes.size() <= 1000)) &&
+      (!('createdAt' in data) || data.createdAt is number) &&
+      (!('updatedAt' in data) || data.updatedAt is number) &&
+      (!('lastLoginAt' in data) || data.lastLoginAt is number);
+    }
+
+    function isValidUserSelfCreate(userId) {
+      return isSignedIn() &&
+        request.auth.uid == userId &&
+        isValidId(userId) &&
+        isValidUserProfileFields(incoming(), userId) &&
+        (!('uid' in incoming()) || incoming().uid == request.auth.uid) &&
+        incoming().role == 'user' &&
+        incoming().isActive == true &&
+        (!('accountStatus' in incoming()) || incoming().accountStatus == 'active');
+    }
+
+    function isValidUserSelfUpdate(userId) {
+      return isSignedIn() &&
+        request.auth.uid == userId &&
+        isValidId(userId) &&
+        isValidUserProfileFields(incoming(), userId) &&
+        incoming().role == existing().role &&
+        incoming().isActive == existing().isActive &&
+        incoming().get('accountStatus', 'active') == existing().get('accountStatus', 'active') &&
+        incoming().get('uid', request.auth.uid) == existing().get('uid', request.auth.uid) &&
+        incoming().get('id', userId) == existing().get('id', userId) &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'displayName',
+          'photoURL',
+          'lastLoginAt',
+          'updatedAt',
+          'emailVerified',
+          'authProvider',
+          'email',
+          'uid',
+          'accountStatus'
+        ]);
+    }
+
+    function isValidNotificationCreate(data, notificationId) {
+      return data.keys().hasAll(['id', 'type', 'title', 'message', 'target', 'isRead', 'createdAt']) &&
+        data.keys().hasOnly([
+          'id',
+          'type',
+          'title',
+          'message',
+          'target',
+          'userId',
+          'targetRole',
+          'isRead',
+          'readByUserIds',
+          'createdAt',
+          'priority',
+          'linkEntity',
+          'broadcastStatus',
+          'createdBy',
+          'uniqueEventKey'
+        ]) &&
+        data.id == notificationId &&
+        data.type is string && data.type.size() >= 1 && data.type.size() <= 64 &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
+        data.message is string && data.message.size() >= 1 && data.message.size() <= 2000 &&
+        data.target in ['all', 'admins', 'technicians', 'user'] &&
+        data.isRead is bool &&
+        data.createdAt is number &&
+        (!('userId' in data) || (data.userId is string && data.userId.size() <= 128)) &&
+        (!('createdBy' in data) || (data.createdBy is string && data.createdBy.size() <= 150)) &&
+        (!('readByUserIds' in data) || (data.readByUserIds is list && data.readByUserIds.size() <= 5000));
+    }
+
+    function isValidNotificationReadUpdate() {
+      return isSignedIn() &&
+        (existing().target == 'all' || existing().userId == request.auth.uid) &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['readByUserIds']) &&
+        incoming().readByUserIds is list &&
+        incoming().readByUserIds.size() <= 5000 &&
+        request.auth.uid in incoming().readByUserIds &&
+        (
+          (!('readByUserIds' in existing()) && incoming().readByUserIds.size() == 1) ||
+          ('readByUserIds' in existing() &&
+            existing().readByUserIds is list &&
+            (
+              incoming().readByUserIds == existing().readByUserIds ||
+              (
+                !(request.auth.uid in existing().readByUserIds) &&
+                incoming().readByUserIds.hasAll(existing().readByUserIds) &&
+                incoming().readByUserIds.size() == existing().readByUserIds.size() + 1
+              )
+            )
+          )
+        );
+    }
+
+    function isValidAuditLogCreate(data, logId) {
+      return data.keys().hasAll(['id', 'actionType', 'timestamp', 'userId', 'userEmail', 'userRole', 'targetType', 'status', 'summary']) &&
+        data.keys().hasOnly([
+          'id',
+          'actionType',
+          'timestamp',
+          'userId',
+          'userEmail',
+          'userRole',
+          'targetType',
+          'targetId',
+          'targetTitle',
+          'status',
+          'summary',
+          'details',
+          'diffSummary',
+          'ipAddress'
+        ]) &&
+        data.id == logId &&
+        data.actionType is string && data.actionType.size() >= 1 && data.actionType.size() <= 64 &&
+        data.timestamp is number &&
+        data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+        data.userEmail is string && data.userEmail.size() >= 1 && data.userEmail.size() <= 150 &&
+        data.userRole in ['admin', 'technician', 'user', 'system'] &&
+        data.targetType is string && data.targetType.size() >= 1 && data.targetType.size() <= 64 &&
+        data.status in ['success', 'failure'] &&
+        data.summary is string && data.summary.size() >= 1 && data.summary.size() <= 1000 &&
+        (!('targetId' in data) || (data.targetId is string && data.targetId.size() <= 128)) &&
+        (!('targetTitle' in data) || (data.targetTitle is string && data.targetTitle.size() <= 300)) &&
+        (!('ipAddress' in data) || (data.ipAddress is string && data.ipAddress.size() <= 64));
+    }
+
+    // User Profiles
+    match /users/{userId} {
+      allow get: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isAdmin() || isValidUserSelfCreate(userId);
+      allow update: if isAdmin() || isValidUserSelfUpdate(userId);
+      allow delete: if isAdmin();
+    }
+
+    // Internal In-App Notifications
+    match /notifications/{notificationId} {
+      allow get, list: if isSignedIn() && (
+        resource.data.target == 'all' ||
+        resource.data.userId == request.auth.uid ||
+        isAdmin()
+      );
+      allow create: if isValidId(notificationId) &&
+        isValidNotificationCreate(incoming(), notificationId) &&
+        (isAdmin() || (isSignedIn() && incoming().target == 'admins' && incoming().isRead == false));
+      allow update: if isAdmin() || isValidNotificationReadUpdate();
+      allow delete: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid && resource.data.target == 'user');
+    }
+
+    // Audit Logs (Strict Admin-only access, append-only and immutable)
+    match /audit_logs/{logId} {
+      allow get, list: if isAdmin();
+      allow create: if isOperationalAdmin() && isValidId(logId) && isValidAuditLogCreate(incoming(), logId);
+      allow update, delete: if false; // IMMUTABLE: cannot be altered or removed via client SDK
+    }
+
+    // Admin authorization documents (Managed strictly by Cloud Functions Admin SDK)
+    match /admins/{adminUid} {
+      allow get: if isSignedIn() && request.auth.uid == adminUid;
+      allow list: if isAdmin();
+      allow write: if false; // Zero client write access; managed strictly via Server
+    }
+
+    // System Configuration (e.g. one-time bootstrap lock, read-only for super_admin, zero client write)
+    match /system_config/{configId} {
+      allow read: if isSuperAdmin();
+      allow write: if false; // Zero client write access; server managed only
+    }
+
+    // Rate limits (Internal server protection against brute force)
+    match /rateLimits/{limitId} {
+      allow read, write: if false;
+    }
+
+    // License Requests (Users submit their device public key, Admin reviews or Cloud Function fulfills)
+    match /licenseRequests/{requestId} {
+      allow get: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && isValidId(requestId) &&
+        incoming().userId == request.auth.uid &&
+        incoming().status == 'pending' &&
+        incoming().deviceId is string && incoming().deviceId.size() <= 128 &&
+        incoming().devicePublicKey is string && incoming().devicePublicKey.size() <= 512;
+      allow update, delete: if isOperationalAdmin();
+    }
+
+    // Licenses (Client write completely prohibited; managed strictly via Server Admin SDK)
+    match /licenses/{licenseId} {
+      allow get: if isSignedIn() && (
+        resource.data.userId == request.auth.uid ||
+        isAdmin()
+      );
+      allow list: if isSignedIn() && (
+        resource.data.userId == request.auth.uid ||
+        isAdmin()
+      );
+      allow write: if false; // Zero client write access; mutations strictly via Server Admin SDK
+    }
+
+    // Devices (Client write completely prohibited; managed strictly via Server Admin SDK)
+    match /devices/{deviceId} {
+      allow get: if isSignedIn() && (
+        isAdmin() ||
+        (resource.data.licenseId != null &&
+         exists(/databases/$(database)/documents/licenses/$(resource.data.licenseId)) &&
+         get(/databases/$(database)/documents/licenses/$(resource.data.licenseId)).data.userId == request.auth.uid)
+      );
+      allow list: if isAdmin();
+      allow write: if false; // Zero client write access; managed strictly via Server Admin SDK
+    }
+
+    // License Audit Logs (Strict Operational Admin Read, Zero Client Write, Append-only via Server Admin SDK)
+    match /licenseAuditLogs/{logId} {
+      allow get, list: if isOperationalAdmin();
+      allow write: if false; // Strict Server Admin SDK append-only; immutable
+    }
+
+    // Single-use device cryptographic challenges (Internal server use only)
+    match /deviceChallenges/{challengeId} {
+      allow read, write: if false; // Managed strictly via Server Admin SDK in Cloud Functions
+    }
+  }
+}

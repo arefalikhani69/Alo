@@ -1,0 +1,67 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Global Default Deny
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Authoritative Single Source of Truth in Named Firestore Database
+    function adminDocPath() {
+      return /databases/ai-studio-autopinpro-6597dde9-59f0-4a2e-90e5-55436f30fb2d/documents/admins/$(request.auth.uid);
+    }
+
+    function isOperationalAdmin() {
+      return isSignedIn() &&
+        firestore.exists(adminDocPath()) &&
+        firestore.get(adminDocPath()).data.active == true &&
+        firestore.get(adminDocPath()).data.role in ['super_admin', 'admin'];
+    }
+
+    function isValidMediaEntityType(entityType) {
+      return entityType in ['vehicle', 'connector', 'fusebox', 'pin', 'diagram'];
+    }
+
+    function isValidPathId(id) {
+      return id is string &&
+        id.size() >= 1 &&
+        id.size() <= 128 &&
+        id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidSafeFileName(fileName) {
+      return fileName is string &&
+        fileName.size() >= 1 &&
+        fileName.size() <= 180 &&
+        fileName.matches('^[a-zA-Z0-9_\\.\\-]+$');
+    }
+
+    function isValidTechnicalImageUpload() {
+      return request.resource != null &&
+        request.resource.size > 0 &&
+        request.resource.size <= 10 * 1024 * 1024 &&
+        request.resource.contentType != null &&
+        request.resource.contentType.matches('image/(jpeg|png|webp)');
+    }
+
+    // Technical Automotive Media: media/{entityType}/{targetId}/{fileName}
+    match /media/{entityType}/{targetId}/{fileName} {
+      // Authenticated users (customers, technicians, admins) may view technical media
+      allow read: if isSignedIn();
+
+      // Only active operational admins (super_admin / admin) may upload valid raster images (<= 10MB)
+      allow create, update: if isOperationalAdmin() &&
+        isValidMediaEntityType(entityType) &&
+        isValidPathId(targetId) &&
+        isValidSafeFileName(fileName) &&
+        isValidTechnicalImageUpload();
+
+      // Only active operational admins may delete stored media files
+      allow delete: if isOperationalAdmin();
+    }
+  }
+}
